@@ -34,9 +34,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/kavian/go-lgtm/internal/handler"
-	"github.com/kavian/go-lgtm/internal/logger"
-	"github.com/kavian/go-lgtm/internal/store"
+	"github.com/kaviankarimzadeh/go-lgtm/internal/handler"
+	"github.com/kaviankarimzadeh/go-lgtm/internal/logger"
+	"github.com/kaviankarimzadeh/go-lgtm/internal/store"
 )
 
 func main() {

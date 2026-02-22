@@ -16,7 +16,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/kavian/go-lgtm/internal/store"
+	"github.com/kaviankarimzadeh/go-lgtm/internal/store"
 )
 
 // CustomerHandler holds the dependencies needed by the customer CRUD handlers.

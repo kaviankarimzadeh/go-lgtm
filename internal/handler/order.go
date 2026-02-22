@@ -26,7 +26,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/kavian/go-lgtm/internal/store"
+	"github.com/kaviankarimzadeh/go-lgtm/internal/store"
 )
 
 // OrderHandler holds the dependencies needed by the order CRUD handlers.

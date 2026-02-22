@@ -9,7 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/kavian/go-lgtm/internal/store"
+	"github.com/kaviankarimzadeh/go-lgtm/internal/store"
 )
 
 // ProductHandler holds the dependencies needed by the product CRUD handlers.

@@ -1,4 +1,4 @@
-module github.com/kavian/go-lgtm
+module github.com/kaviankarimzadeh/go-lgtm
 
 go 1.24.5
 
