@@ -1,0 +1,91 @@
+{{/* orders.html — partial rendered by GET /ui/orders.
+     The Place Order form lets you pick customer and product from live dropdowns
+     populated from the API, then submit — triggering the full cross-service
+     validation flow (order-svc → customer-svc + product-svc). */}}
+{{define "orders"}}
+<!-- Place Order Form -->
+<div class="card">
+  <h3>Place Order</h3>
+  <form hx-post="/ui/orders"
+        hx-target="#tab-orders"
+        hx-swap="innerHTML"
+        hx-on::after-request="window.showToast('Order placed', 'success')">
+    <div class="form-row">
+      <div class="form-group">
+        <label>Customer *</label>
+        <select name="customer_id" required>
+          <option value="">— select customer —</option>
+          {{range .Customers}}
+          <option value="{{.ID}}">{{.Name}} ({{.Country}})</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Product *</label>
+        <select name="product_id" required>
+          <option value="">— select product —</option>
+          {{range .Products}}
+          <option value="{{.ID}}">{{.Name}} — <span class="price">{{divCents .Price}}</span> (stock: {{.Stock}})</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="form-group" style="max-width:100px">
+        <label>Quantity *</label>
+        <input type="number" name="quantity" value="1" min="1" max="99" required>
+      </div>
+      <button type="submit" class="btn btn-success">Place Order</button>
+    </div>
+  </form>
+</div>
+
+<!-- Order List -->
+<div class="card">
+  <h3>All Orders <span class="htmx-indicator"><span class="spinner"></span></span></h3>
+  <div class="table-wrap">
+    {{if .Orders}}
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Customer ID</th>
+          <th>Product ID</th>
+          <th>Qty</th>
+          <th>Total</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Orders}}
+        <tr>
+          <td style="font-family:monospace;font-size:11px;color:var(--muted)">{{slice .ID 0 8}}…</td>
+          <td style="font-family:monospace;font-size:11px;color:var(--muted)">{{slice .CustomerID 0 8}}…</td>
+          <td style="font-family:monospace;font-size:11px;color:var(--muted)">{{slice .ProductID 0 8}}…</td>
+          <td>{{.Quantity}}</td>
+          <td>
+            {{if eq .Total 0}}
+              <span style="color:var(--muted)">—</span>
+            {{else}}
+              <span class="price">{{divCents .Total}}</span>
+            {{end}}
+          </td>
+          <td>
+            {{if eq (string .Status) "confirmed"}}
+              <span class="badge badge-confirmed">confirmed</span>
+            {{else if eq (string .Status) "pending"}}
+              <span class="badge badge-pending">pending</span>
+            {{else if eq (string .Status) "failed"}}
+              <span class="badge badge-failed">failed</span>
+            {{else}}
+              <span class="badge badge-cancelled">{{string .Status}}</span>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="empty">No orders yet. Place one above or click Simulate Load.</div>
+    {{end}}
+  </div>
+</div>
+{{end}}

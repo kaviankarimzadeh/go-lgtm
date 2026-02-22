@@ -1,0 +1,196 @@
+// =============================================================================
+// Grafana Alloy Configuration — go-lgtm observability stack (Phase 1: Logs)
+// =============================================================================
+//
+// Alloy is Grafana's OpenTelemetry Collector distribution. It uses a
+// declarative River-based configuration language where you connect components
+// together to form pipelines.
+//
+// Two parallel log pipelines run side by side:
+//
+//   Pipeline A — Application logs (structured, via OTel SDK):
+//     Go App (OTLP/HTTP) --> otelcol.receiver.otlp --> otelcol.exporter.loki --> loki.write
+//
+//   Pipeline B — Container logs (stdout/stderr of every Docker container):
+//     Docker daemon socket --> loki.source.docker --> loki.write
+//
+// Both pipelines share the same loki.write sink so all logs land in one Loki
+// instance and can be correlated in Grafana using LogQL.
+//
+// Why keep two separate pipelines instead of merging them?
+//   - Pipeline A preserves rich OTel structured attributes (service.name,
+//     service.version, log level, caller location) as Loki structured metadata.
+//   - Pipeline B is the safety net: it captures runtime panics, dependency
+//     log output, and any messages written before the OTel SDK initialises —
+//     things that would otherwise be invisible in Loki.
+//
+// In later phases (metrics, traces, profiling) additional receivers and
+// exporters will be added alongside these pipelines without modifying them.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// OTLP Receiver
+// -----------------------------------------------------------------------------
+// otelcol.receiver.otlp opens two listening ports:
+//   - :4318  HTTP/JSON or HTTP/protobuf  (used by our Go app)
+//   - :4317  gRPC                        (available for future use)
+//
+// The Go app sends logs to http://alloy:4318/v1/logs (OTLP/HTTP).
+// "output" connects this receiver's log stream to the exporter below.
+otelcol.receiver.otlp "default" {
+  // HTTP endpoint — matches OTLP_ENDPOINT=http://alloy:4318 in the app container.
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  // gRPC endpoint — available for other services that prefer gRPC transport.
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+
+  // Wire the output of this receiver directly to the Loki exporter.
+  output {
+    logs = [otelcol.exporter.loki.default.input]
+  }
+}
+
+
+// -----------------------------------------------------------------------------
+// Loki Exporter
+// -----------------------------------------------------------------------------
+// otelcol.exporter.loki converts OTel LogRecords into Loki log entries and
+// pushes them to Loki's native OTLP ingestion endpoint.
+//
+// Why use /otlp/v1/logs instead of /loki/api/v1/push?
+//   - The OTLP endpoint preserves structured attributes (resource attributes,
+//     instrumentation scope) as Loki structured metadata, which can be
+//     queried with LogQL's | line_format or label_format operators.
+//   - The push API requires log entries to already be in Loki's label+line format,
+//     which would lose the rich OTel attribute structure.
+//
+// forward_to connects the exporter's internal loki.LogsReceiver to the
+// loki.write component that actually transmits data to Loki.
+otelcol.exporter.loki "default" {
+  forward_to = [loki.write.default.receiver]
+}
+
+
+// -----------------------------------------------------------------------------
+// Loki Writer (shared by both pipelines)
+// -----------------------------------------------------------------------------
+// loki.write sends log batches to Loki's push API.
+// Both the OTLP pipeline (Pipeline A) and the Docker container pipeline
+// (Pipeline B) forward to this single writer, so all logs are co-located
+// in one Loki instance and queryable together in Grafana.
+//
+// In production you would add:
+//   - basic_auth or bearer_token for authentication
+//   - tls block with certificate paths
+//   - queue_config for buffering during Loki unavailability
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+    // No authentication required for a local Docker Compose stack.
+    // For Grafana Cloud, replace with the cloud endpoint and add an API key:
+    // url = "https://logs-prod-xxx.grafana.net/loki/api/v1/push"
+    // basic_auth { username = "123456"  password = "<grafana-cloud-api-key>" }
+  }
+}
+
+
+// =============================================================================
+// Pipeline B — Container Logs
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Docker Service Discovery
+// -----------------------------------------------------------------------------
+// discovery.docker discovers all containers currently running on the local
+// Docker daemon and exposes them as targets for loki.source.docker.
+//
+// It sets __meta_docker_* labels on each target (container name, image, ID,
+// network, etc.). These are internal meta-labels — they must be relabelled
+// into plain Loki stream labels before they reach loki.write, which is done
+// in the relabel_rules block inside loki.source.docker below.
+//
+// refresh_interval: how often Alloy re-queries the Docker API for new or
+// removed containers. 10s is a good balance for local development.
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+}
+
+
+// -----------------------------------------------------------------------------
+// Docker Meta-label Relabelling
+// -----------------------------------------------------------------------------
+// discovery.relabel transforms the raw __meta_docker_* labels set by
+// discovery.docker into plain labels that become Loki stream labels.
+//
+// Why use discovery.relabel instead of stage.labels inside loki.process?
+//   __meta_docker_* labels are TARGET-level metadata, available during
+//   service discovery. By the time a log line reaches loki.process, those
+//   meta-labels are no longer in scope — only the labels already promoted
+//   to stream labels are visible. discovery.relabel runs at discovery time,
+//   so it can read and rename __meta_docker_* labels correctly.
+//
+// Rule 1 — container_name:
+//   __meta_docker_container_name contains a leading slash (e.g. "/go-lgtm-app").
+//   The regex strips it so the label value is clean: "go-lgtm-app".
+discovery.relabel "docker_meta" {
+  targets = discovery.docker.containers.targets
+
+  // Promote container name, stripping the leading "/" Docker adds.
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container_name"
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Docker Container Log Source
+// -----------------------------------------------------------------------------
+// loki.source.docker tails the stdout/stderr stream of every container
+// discovered by discovery.docker above.
+//
+// labels: static key/value pairs stamped on EVERY log entry from this source.
+//   We add source="docker" so you can distinguish Pipeline B logs from the
+//   OTLP application logs (Pipeline A) in LogQL:
+//     {source="docker"} vs {service_name="go-lgtm"}
+//
+// relabel_rules: the correct place to promote __meta_docker_* meta-labels
+//   into Loki stream labels. Meta-labels are available here (at the target
+//   level) but NOT inside loki.process stages, which only see the log line
+//   and labels already set at this point.
+//
+//   We use discovery.relabel to build the relabeled target list and pass
+//   the result to loki.source.docker — see the discovery.relabel component
+//   below. This is the canonical pattern recommended by Grafana.
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.docker_meta.output
+  labels     = { source = "docker" }
+  forward_to = [loki.process.container_logs.receiver]
+}
+
+
+// -----------------------------------------------------------------------------
+// Container Log Processor
+// -----------------------------------------------------------------------------
+// loki.process applies transformations to raw Docker log lines after the
+// stream labels (container_name, source) are already set.
+//
+// Stage — docker:
+//   Docker wraps every log line in a JSON envelope before writing it to the
+//   daemon's log store:
+//     {"log":"<actual line>\n","stream":"stdout","time":"<rfc3339nano>"}
+//   The "docker" stage unwraps this envelope, extracting the raw log line as
+//   the entry body and discarding the wrapper fields.
+loki.process "container_logs" {
+  // Unwrap Docker's JSON envelope to get the raw log line as the entry body.
+  stage.docker {}
+
+  forward_to = [loki.write.default.receiver]
+}

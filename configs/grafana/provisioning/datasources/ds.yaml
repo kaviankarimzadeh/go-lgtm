@@ -1,0 +1,41 @@
+# Grafana Datasource Provisioning
+# ================================
+# Grafana supports "provisioning" — loading configuration from YAML files at
+# startup so you never have to manually add datasources through the UI.
+# This file is mounted into /etc/grafana/provisioning/datasources/ inside
+# the Grafana container (see docker-compose.yml).
+#
+# Reference: https://grafana.com/docs/grafana/latest/administration/provisioning/#data-sources
+
+apiVersion: 1
+
+datasources:
+  # ---------------------------------------------------------------------------
+  # Loki — Log Aggregation
+  # ---------------------------------------------------------------------------
+  # Loki stores and indexes log streams. Grafana queries it using LogQL,
+  # a PromQL-inspired query language for logs.
+  #
+  # The URL uses the Docker Compose service name "loki" which resolves to
+  # the Loki container on the internal Docker network. Port 3100 is Loki's
+  # default HTTP port.
+  - name: Loki
+    type: loki
+    access: proxy        # Grafana backend proxies queries to Loki (not the browser)
+    orgId: 1
+    url: http://loki:3100
+    basicAuth: false
+    isDefault: true      # Make Loki the default datasource in Explore view
+    version: 1
+    editable: true       # Allow UI edits — useful while learning/experimenting
+    jsonData:
+      # maxLines controls how many log lines Grafana fetches per query.
+      # 1000 is a safe default for local development.
+      maxLines: 1000
+      # derivedFields can link log lines to traces by extracting a trace ID field.
+      # This will be configured in Phase 3 (Tempo) when we add distributed tracing.
+      # derivedFields:
+      #   - name: TraceID
+      #     matcherRegex: '"trace_id":"(\w+)"'
+      #     url: http://localhost:3200/tempo/api/traces/${__value.raw}
+      #     datasourceUid: tempo

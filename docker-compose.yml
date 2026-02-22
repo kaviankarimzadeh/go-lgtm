@@ -1,0 +1,239 @@
+# Docker Compose — go-lgtm e-commerce observability stack (Phase 1: Logs)
+# ==========================================================================
+#
+# Services and their roles:
+#
+#   api-gateway   — HTMX web UI + API proxy (port 8080)
+#   order-svc     — Order management, cross-service validation (port 8081)
+#   product-svc   — Product catalogue (port 8082)
+#   customer-svc  — Customer profiles (port 8083)
+#   alloy         — Grafana Alloy: OTLP receiver + Docker log tailing
+#   loki          — Log storage and query backend
+#   grafana       — Visualisation dashboard (port 3000)
+#
+# Log pipelines (two parallel, both land in Loki):
+#   Pipeline A (application logs via OTLP):
+#     all services --OTLP/HTTP--> alloy:4318 --> loki:3100 --> grafana:3000
+#
+#   Pipeline B (container stdout/stderr via Docker socket):
+#     Docker socket --> alloy (loki.source.docker) --> loki:3100 --> grafana:3000
+#
+# Cross-service traffic (generates correlated log lines across services):
+#   browser → api-gateway → order-svc → customer-svc  (validate customer)
+#                                    → product-svc    (validate stock)
+#
+# Usage:
+#   docker compose up --build        # build all service images and start everything
+#   docker compose down -v           # stop and remove containers + named volumes
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # API Gateway
+  # ---------------------------------------------------------------------------
+  # Serves the HTMX web UI at http://localhost:8080 and proxies API calls
+  # to the downstream services. All external browser traffic goes through here.
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api-gateway         # selects the api-gateway final stage
+    container_name: api-gateway
+    ports:
+      - "8080:8080"               # Web UI + API proxy — open http://localhost:8080
+    environment:
+      LISTEN_ADDR:      ":8080"
+      OTLP_ENDPOINT:    "http://alloy:4318"
+      SERVICE_NAME:     "api-gateway"
+      SERVICE_VERSION:  "0.1.0"
+      ENVIRONMENT:      "local"
+      CUSTOMER_SVC_URL: "http://customer-svc:8083"
+      PRODUCT_SVC_URL:  "http://product-svc:8082"
+      ORDER_SVC_URL:    "http://order-svc:8081"
+      HEALTH_URL:       "http://localhost:8080/health"
+    depends_on:
+      alloy:        { condition: service_started }
+      order-svc:    { condition: service_healthy }
+      product-svc:  { condition: service_healthy }
+      customer-svc: { condition: service_healthy }
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Order Service
+  # ---------------------------------------------------------------------------
+  # Accepts new orders and validates them against customer-svc and product-svc.
+  # This cross-service fan-out is the core learning scenario:
+  #   - Confirms an order → info log in order-svc + product-svc + customer-svc
+  #   - Invalid customer  → warn logs in order-svc AND customer-svc
+  #   - Out-of-stock      → warn log in order-svc
+  order-svc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: order-svc
+    container_name: order-svc
+    ports:
+      - "8081:8081"               # Direct access for debugging
+    environment:
+      LISTEN_ADDR:      ":8081"
+      OTLP_ENDPOINT:    "http://alloy:4318"
+      SERVICE_NAME:     "order-svc"
+      SERVICE_VERSION:  "0.1.0"
+      ENVIRONMENT:      "local"
+      CUSTOMER_SVC_URL: "http://customer-svc:8083"
+      PRODUCT_SVC_URL:  "http://product-svc:8082"
+      HEALTH_URL:       "http://localhost:8081/health"
+    depends_on:
+      alloy:        { condition: service_started }
+      customer-svc: { condition: service_healthy }
+      product-svc:  { condition: service_healthy }
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Product Service
+  # ---------------------------------------------------------------------------
+  product-svc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: product-svc
+    container_name: product-svc
+    ports:
+      - "8082:8082"
+    environment:
+      LISTEN_ADDR:     ":8082"
+      OTLP_ENDPOINT:   "http://alloy:4318"
+      SERVICE_NAME:    "product-svc"
+      SERVICE_VERSION: "0.1.0"
+      ENVIRONMENT:     "local"
+      HEALTH_URL:      "http://localhost:8082/health"
+    depends_on:
+      alloy: { condition: service_started }
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Customer Service
+  # ---------------------------------------------------------------------------
+  customer-svc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: customer-svc
+    container_name: customer-svc
+    ports:
+      - "8083:8083"
+    environment:
+      LISTEN_ADDR:     ":8083"
+      OTLP_ENDPOINT:   "http://alloy:4318"
+      SERVICE_NAME:    "customer-svc"
+      SERVICE_VERSION: "0.1.0"
+      ENVIRONMENT:     "local"
+      HEALTH_URL:      "http://localhost:8083/health"
+    depends_on:
+      alloy: { condition: service_started }
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Grafana Alloy — Telemetry Collector
+  # ---------------------------------------------------------------------------
+  # Receives OTLP logs from all four services and tails Docker container logs.
+  alloy:
+    image: grafana/alloy:latest
+    container_name: alloy
+    ports:
+      - "12345:12345"   # Alloy debug UI — http://localhost:12345
+      - "4317:4317"     # OTLP gRPC receiver
+      - "4318:4318"     # OTLP HTTP receiver (used by all services)
+    volumes:
+      - ./configs/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+    depends_on:
+      loki: { condition: service_started }
+    networks:
+      - observability
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Loki — Log Aggregation Backend
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.6
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command:
+      - -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+    networks:
+      - observability
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Grafana — Visualisation
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:12.3
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED:    "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE:   "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM:   "true"
+      GF_PATHS_PROVISIONING:        "/etc/grafana/provisioning"
+    volumes:
+      - ./configs/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      loki: { condition: service_started }
+    networks:
+      - observability
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# Networks & Volumes
+# ---------------------------------------------------------------------------
+networks:
+  observability:
+    driver: bridge
+
+volumes:
+  loki-data:
+  grafana-data:

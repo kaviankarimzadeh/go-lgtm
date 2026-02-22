@@ -1,0 +1,17 @@
+{{/* stats.html — partial rendered by GET /ui/stats, polled every 5 s by index.html.
+     The .Customers / .Products / .Orders fields are integers from the store Count() calls.
+     HTMX swaps this fragment into the .stats div without a full page reload. */}}
+{{define "stats"}}
+<div class="stat-card customers">
+  <div class="label">Customers</div>
+  <div class="value">{{.Customers}}</div>
+</div>
+<div class="stat-card products">
+  <div class="label">Products</div>
+  <div class="value">{{.Products}}</div>
+</div>
+<div class="stat-card orders">
+  <div class="label">Orders</div>
+  <div class="value">{{.Orders}}</div>
+</div>
+{{end}}

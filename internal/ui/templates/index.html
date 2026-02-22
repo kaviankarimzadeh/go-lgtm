@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>go-lgtm · E-Commerce Demo</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <!--
+    HTMX — handles all form submissions and tab content swaps without page reloads.
+    Using the CDN version to avoid a build step. All hx-* attributes below are HTMX.
+    Docs: https://htmx.org/docs/
+  -->
+  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
+</head>
+<body>
+
+<header>
+  <h1>⚡ go-lgtm</h1>
+  <nav>
+    <a href="https://grafana.com/docs/loki/latest/query/" target="_blank">LogQL Docs</a>
+    <a class="grafana-link" href="http://localhost:3000" target="_blank">
+      📊 Open Grafana
+    </a>
+  </nav>
+</header>
+
+<div class="container">
+
+  <!-- ── Live Counters ────────────────────────────────────── -->
+  <!--
+    hx-get: polls the /ui/stats endpoint every 5 s and swaps the inner HTML.
+    This produces periodic GET log lines in Loki — useful for demonstrating
+    steady background traffic on the Grafana time axis.
+  -->
+  <div class="stats"
+       hx-get="/ui/stats"
+       hx-trigger="load, every 5s"
+       hx-swap="innerHTML">
+    {{template "stats" .}}
+  </div>
+
+  <!-- ── Action Bar ───────────────────────────────────────── -->
+  <div class="action-bar">
+    <!-- Trigger Error: places an order with a non-existent customer ID.
+         This intentionally produces a Warn log in order-svc AND in customer-svc.
+         Great for demonstrating cross-service error correlation in Loki. -->
+    <button class="btn btn-error"
+            hx-post="/ui/trigger-error"
+            hx-swap="none"
+            hx-on::after-request="showToast('⚠️ Error order placed — check Loki for warn logs', 'warn')">
+      Trigger Error
+    </button>
+
+    <div class="divider"></div>
+
+    <!-- Simulate Load: fires N random orders concurrently.
+         Each order touches api-gateway → order-svc → customer-svc + product-svc.
+         Produces a burst of structured logs across all four services —
+         ideal for filling Grafana's Logs Volume panel. -->
+    <div class="load-controls">
+      <label for="load-n">Orders to fire:</label>
+      <input id="load-n" type="number" value="20" min="1" max="200" style="width:72px">
+      <button class="btn btn-warn"
+              onclick="simulateLoad()">
+        🔥 Simulate Load
+      </button>
+      <span id="load-status" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+  </div>
+
+  <!-- ── Tabs ─────────────────────────────────────────────── -->
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('customers', this)">Customers</button>
+    <button class="tab-btn"       onclick="switchTab('products',  this)">Products</button>
+    <button class="tab-btn"       onclick="switchTab('orders',    this)">Orders</button>
+  </div>
+
+  <!-- Customers tab -->
+  <div id="tab-customers" class="tab-panel active"
+       hx-get="/ui/customers"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <div class="empty">Loading…</div>
+  </div>
+
+  <!-- Products tab -->
+  <div id="tab-products" class="tab-panel"
+       hx-get="/ui/products"
+       hx-trigger="revealed"
+       hx-swap="innerHTML">
+    <div class="empty">Loading…</div>
+  </div>
+
+  <!-- Orders tab -->
+  <div id="tab-orders" class="tab-panel"
+       hx-get="/ui/orders"
+       hx-trigger="revealed"
+       hx-swap="innerHTML">
+    <div class="empty">Loading…</div>
+  </div>
+
+</div><!-- /container -->
+
+<!-- Toast container (populated by JS below) -->
+<div id="toast-container"></div>
+
+<script>
+// ── Tab switching ──────────────────────────────────────────
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  const panel = document.getElementById('tab-' + name);
+  panel.classList.add('active');
+  // htmx.trigger fires the hx-trigger="revealed" on the newly visible panel,
+  // which causes HTMX to fetch its content if it hasn't loaded yet.
+  htmx.trigger(panel, 'revealed');
+}
+
+// ── Simulate Load ──────────────────────────────────────────
+// Fires N POST /orders requests concurrently (via Promise.all) with random
+// customer_id / product_id values fetched first from the API.
+// Using "invalid-id" occasionally ensures some orders fail intentionally,
+// producing warn logs — a realistic mix of info + warn in Loki.
+async function simulateLoad() {
+  const n = parseInt(document.getElementById('load-n').value, 10) || 20;
+  const status = document.getElementById('load-status');
+  status.textContent = `Firing ${n} orders…`;
+
+  // Fetch current customers and products to use real IDs.
+  let customers = [], products = [];
+  try {
+    [customers, products] = await Promise.all([
+      fetch('/customers').then(r => r.json()),
+      fetch('/products').then(r => r.json()),
+    ]);
+  } catch (e) {
+    showToast('Could not fetch customers/products', 'error');
+    status.textContent = '';
+    return;
+  }
+
+  if (!customers.length || !products.length) {
+    showToast('Seed some customers and products first!', 'warn');
+    status.textContent = '';
+    return;
+  }
+
+  const rand = arr => arr[Math.floor(Math.random() * arr.length)];
+
+  const requests = Array.from({ length: n }, (_, i) => {
+    // ~20% of orders use an invalid customer ID to produce warn logs.
+    const customerId = Math.random() < 0.2 ? 'invalid-error-id' : rand(customers).id;
+    const product = rand(products);
+    return fetch('/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customer_id: customerId,
+        product_id: product.id,
+        quantity: Math.ceil(Math.random() * 3),
+      }),
+    });
+  });
+
+  const results = await Promise.allSettled(requests);
+  const ok  = results.filter(r => r.status === 'fulfilled').length;
+  const err = results.length - ok;
+  status.textContent = `Done: ${ok} sent`;
+  showToast(`Load simulation: ${ok} orders sent (${err} network errors)`, ok === n ? 'success' : 'warn');
+
+  // Refresh the orders tab if it's visible.
+  const ordersPanel = document.getElementById('tab-orders');
+  if (ordersPanel.classList.contains('active')) {
+    htmx.ajax('GET', '/ui/orders', { target: ordersPanel, swap: 'innerHTML' });
+  }
+}
+
+// ── Toast helper ───────────────────────────────────────────
+function showToast(msg, type = 'info') {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// Expose showToast for hx-on attributes.
+window.showToast = showToast;
+</script>
+</body>
+</html>
